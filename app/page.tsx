@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { useWallet, useConnection } from "@solana/wallet-adapter-react";
-
+import { useState, useRef, useEffect } from "react";
+import { useConnection } from "@solana/wallet-adapter-react";
 import {
   PublicKey,
   SystemProgram,
@@ -16,17 +15,13 @@ import {
   getAssociatedTokenAddressSync,
   MINT_SIZE,
 } from "@solana/spl-token";
-import {
-  createMetadata,
-  getMetadataPDA,
-  TOKEN_METADATA_PROGRAM_ID,
-} from "@metaplex-foundation/mpl-token-metadata";
 
-// ─── YOUR CONFIG ──────────────────────────────────────
 const FEE_RECIPIENT = "Hvv64sRrMSnYbDqkQLfyyyp5qvjmSCmC4Fs5mSBXWNWY";
 const BASE_FEE = 0.05;
 const ADDON_FEE = 0.05;
-// ──────────────────────────────────────────────────────
+const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
+  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
+);
 
 type FormState = {
   name: string;
@@ -48,9 +43,9 @@ type FormState = {
 };
 
 export default function TokenCreatorPage() {
-  const { wallet, connected } = useWallet();
   const { connection } = useConnection();
   const fileRef = useRef<HTMLInputElement>(null);
+  const [walletAddress, setWalletAddress] = useState<string | null>(null);
 
   const [form, setForm] = useState<FormState>({
     name: "",
@@ -76,6 +71,14 @@ export default function TokenCreatorPage() {
   const [success, setSuccess] = useState<string | null>(null);
   const [step, setStep] = useState("");
 
+  // Check if already connected on page load
+  useEffect(() => {
+    const solana = (window as any).solana;
+    if (solana?.isPhantom && solana?.publicKey) {
+      setWalletAddress(solana.publicKey.toBase58());
+    }
+  }, []);
+
   const totalFee =
     BASE_FEE +
     (form.creatorEnabled ? ADDON_FEE : 0) +
@@ -95,8 +98,34 @@ export default function TokenCreatorPage() {
     }
   };
 
+  const connectWallet = async () => {
+    const solana = (window as any).solana;
+    if (!solana?.isPhantom) {
+      alert("Phantom not found. Install it at phantom.app");
+      window.open("https://phantom.app/download", "_blank");
+      return;
+    }
+    try {
+      const resp = await solana.connect();
+      if (resp.publicKey) {
+        setWalletAddress(resp.publicKey.toBase58());
+      }
+    } catch (e) {
+      alert("Connection rejected.");
+    }
+  };
+
+  const disconnectWallet = async () => {
+    const solana = (window as any).solana;
+    if (solana?.disconnect) {
+      await solana.disconnect();
+    }
+    setWalletAddress(null);
+  };
+
   const createToken = async () => {
-    if (!wallet || !connected) {
+    const solana = (window as any).solana;
+    if (!solana?.isPhantom || !solana?.publicKey) {
       setError("Connect your Phantom wallet first.");
       return;
     }
@@ -109,61 +138,130 @@ export default function TokenCreatorPage() {
     setError("");
 
     try {
+      const userPublicKey = solana.publicKey;
+
       // Step 1: Create mint
       setStep("Creating mint...");
-      const mint = await createMint(
-        connection,
-        wallet,
-        wallet.publicKey,
-        form.revokeMint ? null : wallet.publicKey,
-        form.revokeFreeze ? null : wallet.publicKey,
-        form.decimals,
-        MINT_SIZE
+      const { Keypair, SystemProgram: SysProg } = await import("@solana/web3.js");
+      const mintKeypair = Keypair.generate();
+
+      const createMintTx = new Transaction().add(
+        SysProg.createAccount({
+          fromPubkey: userPublicKey,
+          newAccountPubkey: mintKeypair.publicKey,
+          lamports: await connection.getMinimumBalanceForRentExemption(MINT_SIZE),
+          space: MINT_SIZE,
+          programId: (await import("@solana/spl-token")).TOKEN_PROGRAM_ID,
+        }),
+        (await import("@solana/spl-token")).createInitializeMint2Instruction(
+          mintKeypair.publicKey,
+          form.decimals,
+          form.revokeMint ? null : userPublicKey,
+          form.revokeFreeze ? null : userPublicKey,
+          (await import("@solana/spl-token")).TOKEN_PROGRAM_ID
+        )
       );
+
+      const createMintSig = await sendAndConfirmTransaction(
+        connection,
+        createMintTx,
+        [userPublicKey, mintKeypair]
+      );
+      await connection.confirmTransaction(createMintSig);
+      const mint = mintKeypair.publicKey;
 
       // Step 2: Mint supply
       setStep("Minting supply...");
-      const ata = getAssociatedTokenAddressSync(mint, wallet.publicKey);
-      await mintTo(
-        connection,
-        wallet,
-        mint,
-        ata,
-        wallet.publicKey,
-        form.supply
+      const { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
+      const ata = getAssociatedTokenAddressSync(mint, userPublicKey);
+
+      const createAtaTx = new Transaction().add(
+        (await import("@solana/spl-token")).createAssociatedTokenAccountIdempotentInstruction(
+          userPublicKey,
+          ata,
+          userPublicKey,
+          mint
+        )
+      );
+      await sendAndConfirmTransaction(connection, createAtaTx, [userPublicKey]);
+
+      const mintTx = new Transaction().add(
+        (await import("@solana/spl-token")).createMintToInstruction(
+          mint,
+          ata,
+          userPublicKey,
+          form.supply
+        )
+      );
+      await sendAndConfirmTransaction(connection, mintTx, [userPublicKey]);
+
+      // Step 3: Create Metaplex metadata
+      setStep("Creating metadata...");
+      const [metadataPDA] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("metadata"),
+          TOKEN_METADATA_PROGRAM_ID.toBuffer(),
+          mint.toBuffer(),
+        ],
+        TOKEN_METADATA_PROGRAM_ID
       );
 
-      // Step 3: Create metadata
-      setStep("Creating metadata...");
       const metadataUri = buildMetadataUri();
-      const [metadataPda] = getMetadataPDA({
-        mint,
-        programId: TOKEN_METADATA_PROGRAM_ID,
-      });
 
-      await createMetadata(
-        connection,
-        wallet,
-        metadataPda,
-        wallet.publicKey,
-        mint,
+      const creators = form.creatorEnabled && form.creatorAddress
+        ? [
+            {
+              address: new PublicKey(form.creatorAddress),
+              share: 100,
+              verified: false,
+            },
+          ]
+        : [
+            {
+              address: userPublicKey,
+              share: 100,
+              verified: false,
+            },
+          ];
+
+      const metadataIx = createCreateMetadataAccountV3Instruction(
         {
-          name: form.name,
-          symbol: form.symbol,
-          uri: metadataUri,
+          metadata: metadataPDA,
+          mint: mint,
+          mintAuthority: userPublicKey,
+          payer: userPublicKey,
+          updateAuthority: userPublicKey,
+        },
+        {
+          createMetadataAccountArgsV3: {
+            collectionDetails: null,
+            data: {
+              name: form.name,
+              symbol: form.symbol,
+              uri: metadataUri,
+              sellerFeeBasisPoints: 0,
+              creators: creators,
+              collection: null,
+              uses: null,
+            },
+            isMutable: true,
+          },
         }
       );
+
+      const metadataTx = new Transaction().add(metadataIx);
+      await sendAndConfirmTransaction(connection, metadataTx, [userPublicKey]);
 
       // Step 4: Send fee
       setStep("Sending fee...");
       const feeTx = new Transaction().add(
         SystemProgram.transfer({
-          fromPubkey: wallet.publicKey,
+          fromPubkey: userPublicKey,
           toPubkey: new PublicKey(FEE_RECIPIENT),
           lamports: Math.floor(totalFee * LAMPORTS_PER_SOL),
         })
       );
-      await sendAndConfirmTransaction(connection, feeTx, [wallet]);
+      await sendAndConfirmTransaction(connection, feeTx, [userPublicKey]);
 
       setStep("Done!");
       setSuccess(mint.toBase58());
@@ -183,19 +281,7 @@ export default function TokenCreatorPage() {
       image: form.logo || "",
       seller_fee_basis_points: 0,
       attributes: [],
-      properties: {},
     };
-
-    if (form.creatorEnabled && form.creatorName) {
-      metadata.properties = {
-        creators: [
-          {
-            address: form.creatorAddress || wallet?.publicKey?.toBase58() || "",
-            share: 100,
-          },
-        ],
-      };
-    }
 
     if (form.socialEnabled) {
       const socials: any[] = [];
@@ -220,20 +306,13 @@ export default function TokenCreatorPage() {
             </span>
           </span>
           <button
-  className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-purple-600 to-green-500 text-sm font-medium hover:opacity-90 transition"
-  onClick={async () => {
-    if (!connected && wallet) {
-      await wallet.connect();
-    } else if (connected && wallet) {
-      await wallet.disconnect();
-    }
-  }}
->
-  {connected
-    ? wallet?.publicKey?.toBase58().slice(0, 4) + "..." +
-      wallet?.publicKey?.toBase58().slice(-4)
-    : "Connect Wallet"}
-</button>   
+            className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-purple-600 to-green-500 text-sm font-medium hover:opacity-90 transition"
+            onClick={walletAddress ? disconnectWallet : connectWallet}
+          >
+            {walletAddress
+              ? walletAddress.slice(0, 4) + "..." + walletAddress.slice(-4)
+              : "Connect Wallet"}
+          </button>
         </div>
       </header>
 
@@ -242,7 +321,6 @@ export default function TokenCreatorPage() {
         <p className="text-gray-400 mb-8">Deploy your Solana token in seconds.</p>
 
         <div className="space-y-6">
-          {/* Basic Info */}
           <div className="bg-white/5 rounded-2xl border border-white/10 p-6 space-y-4">
             <div>
               <label className="block text-sm text-gray-400 mb-1">Token Name *</label>
@@ -314,7 +392,6 @@ export default function TokenCreatorPage() {
             </div>
           </div>
 
-          {/* Add-ons */}
           <div className="bg-white/5 rounded-2xl border border-white/10 p-6 space-y-4">
             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Add-ons</h2>
 
@@ -389,7 +466,6 @@ export default function TokenCreatorPage() {
             )}
           </div>
 
-          {/* Revoke Authorities */}
           <div className="bg-white/5 rounded-2xl border border-white/10 p-6 space-y-4">
             <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Revoke Authorities</h2>
             <p className="text-xs text-gray-500">Each is +{ADDON_FEE} SOL</p>
@@ -417,7 +493,6 @@ export default function TokenCreatorPage() {
             ))}
           </div>
 
-          {/* Fee + Submit */}
           <div className="bg-gradient-to-r from-purple-600/10 to-green-500/10 rounded-2xl border border-purple-500/20 p-6">
             <div className="flex items-center justify-between mb-4">
               <div>
@@ -426,7 +501,7 @@ export default function TokenCreatorPage() {
               </div>
               <button
                 onClick={createToken}
-                disabled={!connected || creating}
+                disabled={!walletAddress || creating}
                 className="px-8 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-green-500 font-bold text-base hover:opacity-90 transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {creating ? step || "Creating..." : "Launch Token"}
@@ -438,7 +513,6 @@ export default function TokenCreatorPage() {
           </div>
         </div>
 
-        {/* Success Modal */}
         {success && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
             <div className="bg-[#1a1a2e] border border-white/10 rounded-2xl p-8 max-w-md w-full mx-4 text-center">

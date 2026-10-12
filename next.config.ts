@@ -1,20 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  experimental: {
-    agentFeedback: true,
-  },
-  cacheComponents: true,
-  partialPrefetching: true,
-  turbopack: {
-    rules: {
-      "*.css": {
-        loaders: ["@tailwindcss/turbopack"],
-        as: "*.css",
-      },
-    },
-  },
+  serverExternalPackages: [
+    "@solana/web3.js",
+    "@solana/spl-token",
+    "@solana/wallet-adapter-react",
+    "@solana/wallet-adapter-phantom",
+    // "@metaplex-foundation/js" is removed
+  ],
 };
 
-export default nextConfig;
+export default nextConfig;   

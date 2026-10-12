@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import Providers from "./providers";
+import Wrapper from "./wrapper";
 
 export const metadata: Metadata = {
   title: "Solana Token Creator",
@@ -14,8 +14,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
+      <head>
+        <script src="https://cdn.tailwindcss.com"></script>
+      </head>
       <body className="antialiased">
-        <Providers>{children}</Providers>
+        <Wrapper>{children}</Wrapper>
       </body>
     </html>
   );
