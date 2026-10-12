@@ -1,557 +1,326 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { useConnection } from "@solana/wallet-adapter-react";
+import { useState, useEffect } from "react";
 import {
-  PublicKey,
+  ConnectionProvider,
+  WalletProvider,
+  useWallet,
+} from "@solana/wallet-adapter-react";
+import {
+  WalletModalProvider,
+  WalletMultiButton,
+} from "@solana/wallet-adapter-react-ui";
+import { PhantomWalletAdapter } from "@solana/wallet-adapter-phantom";
+import {
+  clusterApiUrl,
+  Connection,
+  Keypair,
   SystemProgram,
-  Transaction,
-  LAMPORTS_PER_SOL,
-  sendAndConfirmTransaction,
+  TransactionMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
+import { createCreateMetadataAccountV3Instruction } from "@metaplex-foundation/mpl-token-metadata";
 import {
-  createMint,
-  mintTo,
-  getAssociatedTokenAddressSync,
   MINT_SIZE,
+  TOKEN_PROGRAM_ID,
+  createInitializeMintInstruction,
+  createMintToInstruction,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  getMinimumBalanceForRentExemptMint,
 } from "@solana/spl-token";
+// @ts-expect-error This package stylesheet does not provide TypeScript declarations.
+import "@solana/wallet-adapter-react-ui/styles.css";
+function TokenForm() {
+  const { publicKey, signTransaction } = useWallet();
+  const connection = new Connection(clusterApiUrl("mainnet-beta"));
+  const [name, setName] = useState("");
+  const [symbol, setSymbol] = useState("");
+  const [description, setDescription] = useState("");
+  const [supply, setSupply] = useState("1000000000");
+  const [decimals, setDecimals] = useState("9");
+  const [status, setStatus] = useState("");
+  const [mounted, setMounted] = useState(false);
+  const [logo, setLogo] = useState("");
+  const [mintAddress, setMintAddress] = useState("");
+  const [balance, setBalance] = useState("");
+  const [dragOver, setDragOver] = useState(false);
 
-const FEE_RECIPIENT = "Hvv64sRrMSnYbDqkQLfyyyp5qvjmSCmC4Fs5mSBXWNWY";
-const BASE_FEE = 0.05;
-const ADDON_FEE = 0.05;
-const TOKEN_METADATA_PROGRAM_ID = new PublicKey(
-  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s"
-);
-
-type FormState = {
-  name: string;
-  symbol: string;
-  decimals: number;
-  supply: number;
-  description: string;
-  logo: string | null;
-  creatorEnabled: boolean;
-  creatorName: string;
-  creatorAddress: string;
-  socialEnabled: boolean;
-  socialTwitter: string;
-  socialTelegram: string;
-  socialDiscord: string;
-  revokeFreeze: boolean;
-  revokeMint: boolean;
-  revokeUpdate: boolean;
-};
-
-export default function TokenCreatorPage() {
-  const { connection } = useConnection();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [walletAddress, setWalletAddress] = useState<string | null>(null);
-
-  const [form, setForm] = useState<FormState>({
-    name: "",
-    symbol: "",
-    decimals: 9,
-    supply: 1000000000,
-    description: "",
-    logo: null,
-    creatorEnabled: false,
-    creatorName: "",
-    creatorAddress: "",
-    socialEnabled: false,
-    socialTwitter: "",
-    socialTelegram: "",
-    socialDiscord: "",
-    revokeFreeze: false,
-    revokeMint: false,
-    revokeUpdate: false,
-  });
-
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState<string | null>(null);
-  const [step, setStep] = useState("");
-
-  // Check if already connected on page load
   useEffect(() => {
-    const solana = (window as any).solana;
-    if (solana?.isPhantom && solana?.publicKey) {
-      setWalletAddress(solana.publicKey.toBase58());
-    }
+    setMounted(true);
   }, []);
 
-  const totalFee =
-    BASE_FEE +
-    (form.creatorEnabled ? ADDON_FEE : 0) +
-    (form.socialEnabled ? ADDON_FEE : 0) +
-    (form.revokeFreeze ? ADDON_FEE : 0) +
-    (form.revokeMint ? ADDON_FEE : 0) +
-    (form.revokeUpdate ? ADDON_FEE : 0);
+  useEffect(() => {
+    if (publicKey) {
+      connection
+        .getBalance(publicKey)
+        .then((lamports) => setBalance((lamports / 1e9).toFixed(4)))
+        .catch(() => {});
+    }
+  }, [publicKey, connection]);
 
-  const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  function handleLogoUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = (ev) => {
-        setForm((f) => ({ ...f, logo: ev.target?.result as string }));
-      };
+      reader.onload = (ev) => setLogo(ev.target?.result as string);
       reader.readAsDataURL(file);
     }
-  };
+  }
 
-  const connectWallet = async () => {
-    const solana = (window as any).solana;
-    if (!solana?.isPhantom) {
-      alert("Phantom not found. Install it at phantom.app");
-      window.open("https://phantom.app/download", "_blank");
-      return;
+  function handleDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && file.type.startsWith("image/")) {
+      const reader = new FileReader();
+      reader.onload = (ev) => setLogo(ev.target?.result as string);
+      reader.readAsDataURL(file);
     }
-    try {
-      const resp = await solana.connect();
-      if (resp.publicKey) {
-        setWalletAddress(resp.publicKey.toBase58());
-      }
-    } catch (e) {
-      alert("Connection rejected.");
-    }
-  };
+  }
 
-  const disconnectWallet = async () => {
-    const solana = (window as any).solana;
-    if (solana?.disconnect) {
-      await solana.disconnect();
-    }
-    setWalletAddress(null);
-  };
-
-  const createToken = async () => {
-    const solana = (window as any).solana;
-    if (!solana?.isPhantom || !solana?.publicKey) {
-      setError("Connect your Phantom wallet first.");
-      return;
-    }
-    if (!form.name || !form.symbol) {
-      setError("Token name and symbol are required.");
-      return;
-    }
-
-    setCreating(true);
-    setError("");
+  async function createToken() {
+    if (!publicKey) return alert("Connect your wallet first!");
+    if (!signTransaction) return alert("Wallet not ready!");
+    setStatus("Creating...");
 
     try {
-      const userPublicKey = solana.publicKey;
+      const mint = Keypair.generate();
+      const ata = await getAssociatedTokenAddress(mint.publicKey, publicKey);
+      const rent = await getMinimumBalanceForRentExemptMint(connection);
 
-      // Step 1: Create mint
-      setStep("Creating mint...");
-      const { Keypair, SystemProgram: SysProg } = await import("@solana/web3.js");
-      const mintKeypair = Keypair.generate();
-
-      const createMintTx = new Transaction().add(
-        SysProg.createAccount({
-          fromPubkey: userPublicKey,
-          newAccountPubkey: mintKeypair.publicKey,
-          lamports: await connection.getMinimumBalanceForRentExemption(MINT_SIZE),
-          space: MINT_SIZE,
-          programId: (await import("@solana/spl-token")).TOKEN_PROGRAM_ID,
-        }),
-        (await import("@solana/spl-token")).createInitializeMint2Instruction(
-          mintKeypair.publicKey,
-          form.decimals,
-          form.revokeMint ? null : userPublicKey,
-          form.revokeFreeze ? null : userPublicKey,
-          (await import("@solana/spl-token")).TOKEN_PROGRAM_ID
-        )
-      );
-
-      const createMintSig = await sendAndConfirmTransaction(
-        connection,
-        createMintTx,
-        [userPublicKey, mintKeypair]
-      );
-      await connection.confirmTransaction(createMintSig);
-      const mint = mintKeypair.publicKey;
-
-      // Step 2: Mint supply
-      setStep("Minting supply...");
-      const { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
-      const ata = getAssociatedTokenAddressSync(mint, userPublicKey);
-
-      const createAtaTx = new Transaction().add(
-        (await import("@solana/spl-token")).createAssociatedTokenAccountIdempotentInstruction(
-          userPublicKey,
-          ata,
-          userPublicKey,
-          mint
-        )
-      );
-      await sendAndConfirmTransaction(connection, createAtaTx, [userPublicKey]);
-
-      const mintTx = new Transaction().add(
-        (await import("@solana/spl-token")).createMintToInstruction(
-          mint,
-          ata,
-          userPublicKey,
-          form.supply
-        )
-      );
-      await sendAndConfirmTransaction(connection, mintTx, [userPublicKey]);
-
-      // Step 3: Create Metaplex metadata
-      setStep("Creating metadata...");
-      const [metadataPDA] = PublicKey.findProgramAddressSync(
-        [
-          Buffer.from("metadata"),
-          TOKEN_METADATA_PROGRAM_ID.toBuffer(),
-          mint.toBuffer(),
+      const msg = new TransactionMessage({
+        payerKey: publicKey,
+        recentBlockhash: (await connection.getLatestBlockhash()).blockhash,
+        instructions: [
+          SystemProgram.createAccount({
+            fromPubkey: publicKey,
+            newAccountPubkey: mint.publicKey,
+            space: MINT_SIZE,
+            lamports: rent,
+            programId: TOKEN_PROGRAM_ID,
+          }),
+          createInitializeMintInstruction(
+            mint.publicKey,
+            parseInt(decimals),
+            publicKey,
+            publicKey
+          ),
+          createAssociatedTokenAccountInstruction(
+            publicKey, ata, publicKey, mint.publicKey
+          ),
+          createMintToInstruction(
+            mint.publicKey,
+            ata,
+            publicKey,
+            BigInt(supply) * BigInt(10) ** BigInt(decimals)
+          ),
         ],
-        TOKEN_METADATA_PROGRAM_ID
-      );
+      }).compileToV0Message();
 
-      const metadataUri = buildMetadataUri();
-
-      const creators = form.creatorEnabled && form.creatorAddress
-        ? [
-            {
-              address: new PublicKey(form.creatorAddress),
-              share: 100,
-              verified: false,
-            },
-          ]
-        : [
-            {
-              address: userPublicKey,
-              share: 100,
-              verified: false,
-            },
-          ];
-
-      const metadataIx = createCreateMetadataAccountV3Instruction(
-        {
-          metadata: metadataPDA,
-          mint: mint,
-          mintAuthority: userPublicKey,
-          payer: userPublicKey,
-          updateAuthority: userPublicKey,
-        },
-        {
-          createMetadataAccountArgsV3: {
-            collectionDetails: null,
-            data: {
-              name: form.name,
-              symbol: form.symbol,
-              uri: metadataUri,
-              sellerFeeBasisPoints: 0,
-              creators: creators,
-              collection: null,
-              uses: null,
-            },
-            isMutable: true,
-          },
-        }
-      );
-
-      const metadataTx = new Transaction().add(metadataIx);
-      await sendAndConfirmTransaction(connection, metadataTx, [userPublicKey]);
-
-      // Step 4: Send fee
-      setStep("Sending fee...");
-      const feeTx = new Transaction().add(
-        SystemProgram.transfer({
-          fromPubkey: userPublicKey,
-          toPubkey: new PublicKey(FEE_RECIPIENT),
-          lamports: Math.floor(totalFee * LAMPORTS_PER_SOL),
-        })
-      );
-      await sendAndConfirmTransaction(connection, feeTx, [userPublicKey]);
-
-      setStep("Done!");
-      setSuccess(mint.toBase58());
-    } catch (e: any) {
-      setError(e.message || "Transaction failed.");
-    } finally {
-      setCreating(false);
-      setStep("");
+      const tx = new VersionedTransaction(msg);
+      tx.sign([mint]);
+      const signed = await signTransaction(tx);
+      const sig = await connection.sendRawTransaction(signed.serialize());
+      setMintAddress(mint.publicKey.toBase58());
+      setStatus(`✅ Done! Tx: https://solscan.io/tx/${sig}`);
+    } catch (err: any) {
+      setStatus(`❌ Error: ${err.message || "Transaction failed"}`);
     }
-  };
-
-  const buildMetadataUri = () => {
-    const metadata: any = {
-      name: form.name,
-      symbol: form.symbol,
-      description: form.description,
-      image: form.logo || "",
-      seller_fee_basis_points: 0,
-      attributes: [],
-    };
-
-    if (form.socialEnabled) {
-      const socials: any[] = [];
-      if (form.socialTwitter) socials.push({ type: "twitter", value: form.socialTwitter });
-      if (form.socialTelegram) socials.push({ type: "telegram", value: form.socialTelegram });
-      if (form.socialDiscord) socials.push({ type: "discord", value: form.socialDiscord });
-      if (socials.length > 0) metadata.socials = { external_links: socials };
-    }
-
-    const json = JSON.stringify(metadata);
-    return "data:application/json;base64," + btoa(unescape(encodeURIComponent(json)));
-  };
+  }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white font-sans">
-      <header className="sticky top-0 z-50 backdrop-blur-md bg-[#0a0a0f]/80 border-b border-white/5">
-        <div className="max-w-2xl mx-auto flex items-center justify-between px-4 py-3">
-          <span className="font-bold text-lg">
-            Solana Token Creator
-            <span className="ml-2 px-2 py-0.5 bg-orange-500 text-white text-xs rounded-full">
-              MAINNET
-            </span>
-          </span>
-          <button
-            className="px-4 py-1.5 rounded-lg bg-gradient-to-r from-purple-600 to-green-500 text-sm font-medium hover:opacity-90 transition"
-            onClick={walletAddress ? disconnectWallet : connectWallet}
-          >
-            {walletAddress
-              ? walletAddress.slice(0, 4) + "..." + walletAddress.slice(-4)
-              : "Connect Wallet"}
-          </button>
+    <div className="min-h-screen bg-gray-950 text-white">
+      <nav className="border-b border-gray-800 px-6 py-4 flex items-center justify-between max-w-5xl mx-auto">
+        <div className="flex items-center gap-2">
+          <span className="text-2xl">🪙</span>
+          <span className="text-lg font-bold">SolanaLaunch</span>
         </div>
-      </header>
-
-      <main className="max-w-2xl mx-auto px-4 py-10">
-        <h1 className="text-3xl font-bold mb-2">Create Your Token</h1>
-        <p className="text-gray-400 mb-8">Deploy your Solana token in seconds.</p>
-
-        <div className="space-y-6">
-          <div className="bg-white/5 rounded-2xl border border-white/10 p-6 space-y-4">
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Token Name *</label>
-              <input
-                className="w-full bg-white/10 border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                placeholder="Ex: Sigma Coin"
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                maxLength={32}
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Symbol *</label>
-                <input
-                  className="w-full bg-white/10 border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                  placeholder="Ex: SIG"
-                  value={form.symbol}
-                  onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-                  maxLength={10}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-400 mb-1">Decimals</label>
-                <input
-                  type="number"
-                  className="w-full bg-white/10 border border-white/10 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-purple-500"
-                  value={form.decimals}
-                  onChange={(e) => setForm({ ...form, decimals: parseInt(e.target.value) || 0 })}
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Supply *</label>
-              <input
-                type="number"
-                className="w-full bg-white/10 border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                placeholder="1000000000"
-                value={form.supply}
-                onChange={(e) => setForm({ ...form, supply: parseInt(e.target.value) || 0 })}
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Description</label>
-              <textarea
-                className="w-full bg-white/10 border border-white/10 rounded-lg px-4 py-2.5 text-white placeholder-gray-500 focus:outline-none focus:border-purple-500 resize-none"
-                rows={3}
-                placeholder="Describe your token..."
-                value={form.description}
-                onChange={(e) => setForm({ ...form, description: e.target.value })}
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-gray-400 mb-1">Logo</label>
-              <div
-                className="border-2 border-dashed border-white/20 rounded-xl p-6 text-center cursor-pointer hover:border-purple-500 transition"
-                onClick={() => fileRef.current?.click()}
-              >
-                {form.logo ? (
-                  <img src={form.logo} alt="Logo" className="w-20 h-20 rounded-full mx-auto object-cover" />
-                ) : (
-                  <div className="text-gray-500 text-sm">
-                    <p>Click to upload logo</p>
-                    <p className="text-xs mt-1">.png, .jpg</p>
-                  </div>
-                )}
-              </div>
-              <input ref={fileRef} type="file" accept=".png,.jpg,.jpeg" className="hidden" onChange={handleLogoUpload} />
-            </div>
-          </div>
-
-          <div className="bg-white/5 rounded-2xl border border-white/10 p-6 space-y-4">
-            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Add-ons</h2>
-
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Creator Info</p>
-                <p className="text-xs text-gray-500">Add creator to metadata</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-gray-400">+{ADDON_FEE} SOL</span>
-                <button
-                  className={`w-11 h-6 rounded-full transition relative ${form.creatorEnabled ? "bg-purple-600" : "bg-white/10"}`}
-                  onClick={() => setForm({ ...form, creatorEnabled: !form.creatorEnabled })}
-                >
-                  <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition ${form.creatorEnabled ? "left-[22px]" : "left-0.5"}`} />
-                </button>
-              </div>
-            </div>
-            {form.creatorEnabled && (
-              <div className="grid grid-cols-2 gap-3 pl-4 border-l-2 border-purple-500/30">
-                <input
-                  className="w-full bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                  placeholder="Creator name"
-                  value={form.creatorName}
-                  onChange={(e) => setForm({ ...form, creatorName: e.target.value })}
-                />
-                <input
-                  className="w-full bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                  placeholder="Creator wallet address"
-                  value={form.creatorAddress}
-                  onChange={(e) => setForm({ ...form, creatorAddress: e.target.value })}
-                />
-              </div>
+        {mounted && (
+          <div className="flex items-center gap-4">
+            {publicKey && (
+              <span className="text-sm text-gray-400">
+                {balance} SOL
+              </span>
             )}
-
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium">Social Links</p>
-                <p className="text-xs text-gray-500">Add to token metadata</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-gray-400">+{ADDON_FEE} SOL</span>
-                <button
-                  className={`w-11 h-6 rounded-full transition relative ${form.socialEnabled ? "bg-purple-600" : "bg-white/10"}`}
-                  onClick={() => setForm({ ...form, socialEnabled: !form.socialEnabled })}
-                >
-                  <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition ${form.socialEnabled ? "left-[22px]" : "left-0.5"}`} />
-                </button>
-              </div>
-            </div>
-            {form.socialEnabled && (
-              <div className="space-y-3 pl-4 border-l-2 border-purple-500/30">
-                <input
-                  className="w-full bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                  placeholder="Twitter/X URL"
-                  value={form.socialTwitter}
-                  onChange={(e) => setForm({ ...form, socialTwitter: e.target.value })}
-                />
-                <input
-                  className="w-full bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                  placeholder="Telegram URL"
-                  value={form.socialTelegram}
-                  onChange={(e) => setForm({ ...form, socialTelegram: e.target.value })}
-                />
-                <input
-                  className="w-full bg-white/10 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-purple-500"
-                  placeholder="Discord invite"
-                  value={form.socialDiscord}
-                  onChange={(e) => setForm({ ...form, socialDiscord: e.target.value })}
-                />
-              </div>
-            )}
-          </div>
-
-          <div className="bg-white/5 rounded-2xl border border-white/10 p-6 space-y-4">
-            <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Revoke Authorities</h2>
-            <p className="text-xs text-gray-500">Each is +{ADDON_FEE} SOL</p>
-
-            {[
-              { key: "revokeFreeze" as const, label: "Revoke Freeze", desc: "No one can freeze token accounts" },
-              { key: "revokeMint" as const, label: "Revoke Mint", desc: "No one can create more tokens" },
-              { key: "revokeUpdate" as const, label: "Revoke Update", desc: "No one can modify metadata" },
-            ].map((item) => (
-              <div key={item.key} className="flex items-center justify-between">
-                <div>
-                  <p className="text-sm font-medium">{item.label}</p>
-                  <p className="text-xs text-gray-500">{item.desc}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-gray-400">+{ADDON_FEE}</span>
-                  <button
-                    className={`w-11 h-6 rounded-full transition relative ${form[item.key] ? "bg-purple-600" : "bg-white/10"}`}
-                    onClick={() => setForm({ ...form, [item.key]: !form[item.key] })}
-                  >
-                    <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition ${form[item.key] ? "left-[22px]" : "left-0.5"}`} />
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="bg-gradient-to-r from-purple-600/10 to-green-500/10 rounded-2xl border border-purple-500/20 p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <p className="text-sm text-gray-400">Total Fee</p>
-                <p className="text-3xl font-bold text-green-400">{totalFee.toFixed(2)} SOL</p>
-              </div>
-              <button
-                onClick={createToken}
-                disabled={!walletAddress || creating}
-                className="px-8 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-green-500 font-bold text-base hover:opacity-90 transition disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {creating ? step || "Creating..." : "Launch Token"}
-              </button>
-            </div>
-            {error && (
-              <p className="text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-lg p-3">{error}</p>
-            )}
-          </div>
-        </div>
-
-        {success && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
-            <div className="bg-[#1a1a2e] border border-white/10 rounded-2xl p-8 max-w-md w-full mx-4 text-center">
-              <div className="text-5xl mb-4">🎉</div>
-              <h2 className="text-2xl font-bold text-green-400 mb-2">Token Created!</h2>
-              <p className="text-gray-400 text-sm mb-6">Your token is live on Solana mainnet.</p>
-              <div className="bg-white/5 border border-white/10 rounded-xl p-4 mb-6">
-                <p className="text-xs text-gray-500 mb-1">Mint Address</p>
-                <p className="font-mono text-sm text-green-400 break-all">{success}</p>
-              </div>
-              <div className="flex gap-3">
-                <a
-                  href={`https://solscan.io/token/${success}`}
-                  target="_blank"
-                  rel="noopener"
-                  className="flex-1 px-4 py-3 rounded-xl border border-purple-500 text-purple-400 text-sm font-medium hover:bg-purple-500/10 transition"
-                >
-                  View on Solscan ↗
-                </a>
-                <button
-                  onClick={() => {
-                    setSuccess(null);
-                    setForm({
-                      name: "", symbol: "", decimals: 9, supply: 1000000000,
-                      description: "", logo: null, creatorEnabled: false,
-                      creatorName: "", creatorAddress: "", socialEnabled: false,
-                      socialTwitter: "", socialTelegram: "", socialDiscord: "",
-                      revokeFreeze: false, revokeMint: false, revokeUpdate: false,
-                    });
-                  }}
-                  className="flex-1 px-4 py-3 rounded-xl bg-purple-600 text-white text-sm font-medium hover:bg-purple-700 transition"
-                >
-                  Create Another
-                </button>
-              </div>
-            </div>
+            <WalletMultiButton />
           </div>
         )}
+      </nav>
+
+      <main className="max-w-2xl mx-auto px-4 py-12">
+        <h1 className="text-3xl font-bold text-center mb-2">
+          Create Your Token
+        </h1>
+        <p className="text-gray-400 text-center mb-10">
+          Launch your Solana token in seconds — no coding required
+        </p>
+
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-8 space-y-5">
+          <div>
+            <label className="text-sm text-gray-400 mb-1 block">
+              Token Logo
+            </label>
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              className={`border-2 border-dashed rounded-xl p-6 text-center transition-colors ${
+                dragOver
+                  ? "border-purple-500 bg-purple-500/10"
+                  : "border-gray-700 hover:border-gray-600"
+              }`}
+            >
+              {logo ? (
+                <div className="flex flex-col items-center gap-2">
+                  <img
+                    src={logo}
+                    alt="Logo preview"
+                    className="w-20 h-20 rounded-full object-cover"
+                  />
+                  <button
+                    onClick={() => setLogo("")}
+                    className="text-xs text-red-400 hover:text-red-300"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <p className="text-gray-500 text-sm mb-2">
+                    Drag & Drop logo image inside dashed region
+                  </p>
+                  <p className="text-gray-600 text-xs mb-3">
+                    or click to select image
+                  </p>
+                  <label className="inline-block px-4 py-2 bg-gray-800 rounded-lg text-sm cursor-pointer hover:bg-gray-700 transition">
+                    Choose Image
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleLogoUpload}
+                      className="hidden"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <label className="text-sm text-gray-400">Token Name</label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. DogeCoin"
+              className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500"
+            />
+          </div>
+
+          <div>
+            <label className="text-sm text-gray-400">Token Symbol</label>
+            <input
+              value={symbol}
+              onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+              placeholder="e.g. DOGE (max 8 characters)"
+              maxLength={8}
+              className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500"
+            />
+          </div>
+
+          <div>
+            <label className="text-sm text-gray-400">Token Description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Tell us about your token..."
+              rows={3}
+              className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white placeholder-gray-500 resize-none"
+            />
+          </div>
+
+          <div>
+            <label className="text-sm text-gray-400">
+              Decimals (Standard value recommended)
+            </label>
+            <select
+              value={decimals}
+              onChange={(e) => setDecimals(e.target.value)}
+              className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white"
+            >
+              <option value="9">9 (Standard)</option>
+              <option value="6">6</option>
+              <option value="0">0</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="text-sm text-gray-400">
+              Total Supply (Common supply is 1 billion)
+            </label>
+            <input
+              value={supply}
+              onChange={(e) => setSupply(e.target.value)}
+              className="mt-1 w-full bg-gray-800 border border-gray-700 rounded-lg px-4 py-3 text-white"
+            />
+          </div>
+
+          <button
+            onClick={createToken}
+            className="w-full bg-gradient-to-r from-purple-600 to-pink-600 text-white font-bold py-4 rounded-xl text-lg hover:opacity-90 transition"
+          >
+            🚀 Create Token
+          </button>
+
+          {status && (
+            <p
+              className={`text-sm break-all ${
+                status.startsWith("✅")
+                  ? "text-green-400"
+                  : status.startsWith("❌")
+                  ? "text-red-400"
+                  : "text-yellow-400"
+              }`}
+            >
+              {status}
+            </p>
+          )}
+
+          {mintAddress && (
+            <div className="border-t border-gray-800 pt-4">
+              <p className="text-sm text-gray-400 mb-3">
+                Token created! Now add liquidity:
+              </p>
+              <a
+                href={`https://app.raydium.io/pools/swap/create?inputMint=${mintAddress}&outputMint=So11111111111111111111111111111111111111112`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block w-full bg-gradient-to-r from-green-600 to-emerald-600 text-white font-bold py-3 rounded-xl text-center hover:opacity-90 transition"
+              >
+                💧 Add Liquidity on Raydium
+              </a>
+              <p className="text-xs text-gray-500 mt-2 break-all">
+                Mint: {mintAddress}
+              </p>
+            </div>
+          )}
+        </div>
       </main>
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <ConnectionProvider endpoint={clusterApiUrl("mainnet-beta")}>
+      <WalletProvider
+        wallets={[new PhantomWalletAdapter()]}
+        autoConnect
+      >
+        <WalletModalProvider>
+          <TokenForm />
+        </WalletModalProvider>
+      </WalletProvider>
+    </ConnectionProvider>
   );
 }   
